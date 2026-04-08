@@ -14,17 +14,22 @@ from django.contrib.auth.tokens import default_token_generator
 from django.contrib.auth import authenticate, login
 from django.contrib.auth.models import User
 from django.contrib import messages
-from django.db import IntegrityError # Importante para capturar duplicados
+from django.db import IntegrityError 
 
 from django.contrib.auth import update_session_auth_hash
-import random # Para generar un código de 6 dígitos
+import random 
 from django.core.mail import send_mail
 
 from django.contrib.auth import logout
 
 from django.shortcuts import get_object_or_404
-from django.db.models import Avg,Count
+from django.db.models import Avg
 from .models import Resena
+
+from django.urls import reverse
+
+from django.utils import timezone
+from datetime import timedelta
 
 # 1. PANTALLA DE BIENVENIDA (Pública)
 # Esta es la que tiene la frase y botones de "Registrar" o "Loguear"
@@ -142,7 +147,6 @@ def registro_cliente(request):
             except IntegrityError:
                 form.add_error('email', "Este correo ya está registrado.")
 
-        # 🔥 IMPORTANTE: mostrar errores en pantalla
         return render(request, 'core/registro_cliente.html', {'form': form})
 
     else:
@@ -169,6 +173,7 @@ def enviar_correo_activacion(request, user):
         to=[user.email],
     )
     
+    email.content_subtype = "html"
     # Si esto falla, te mostrará el error real de Gmail en la terminal
     email.send(fail_silently=False)
 
@@ -456,7 +461,6 @@ def mis_productos(request):
     productos = request.user.productos.all() 
     return render(request, 'core/mis_productos.html', {'productos': productos})
 
- 
 
 @login_required
 def mis_productos(request):
@@ -624,26 +628,24 @@ def editar_producto(request, producto_id):
 def terminos_view(request):
     return render(request, 'core/terminos.html')
 
-##Apartado favoritos
 @login_required
 def agregar_favorito(request, producto_id):
     producto = get_object_or_404(Producto, id=producto_id)
     
-    # Buscamos si ya existe, si no lo crea
     favorito, created = Favorito.objects.get_or_create(
         usuario=request.user, 
         producto=producto
     )
     
     if not created:
-        # Si ya existía y le dio click de nuevo, lo quitamos (Efecto On/Off)
         favorito.delete()
-        messages.info(request, "Eliminado de tus favoritos.")
+        messages.info(request, f"'{producto.nombre}' eliminado de favoritos.")
     else:
-        messages.success(request, "¡Agregado a tus favoritos!")
+        messages.success(request, f"¡'{producto.nombre}' guardado en favoritos!")
     
-    # Te regresa a la misma página donde estabas
-    return redirect('detalle_producto', producto_id=producto.id)
+    # IMPORTANTE: Forzamos la redirección a la URL de detalle
+    # Esto ignora cualquier configuración de 'next' o redirecciones por rol
+    return redirect(reverse('detalle_producto', kwargs={'producto_id': producto.id}))
 
 @login_required
 def favoritos_view(request):
@@ -654,12 +656,58 @@ def favoritos_view(request):
         'favoritos': mis_favoritos
     })
 
+from django.shortcuts import get_object_or_404, redirect
+from django.contrib import messages
+
 @login_required
 def eliminar_favorito(request, favorito_id):
-    if request.method == 'POST':
-        # Borramos usando el ID de la tabla core_favorito
-        fav = get_object_or_404(Favorito, id=favorito_id, usuario=request.user)
-        fav.delete()
-        messages.success(request, "Se quitó de la lista.")
+    # Buscamos el favorito asegurándonos que sea del usuario actual
+    favorito = get_object_or_404(Favorito, id=favorito_id, usuario=request.user)
+    nombre_producto = favorito.producto.nombre
     
-    return redirect('favoritos') # Nombre de la URL de tu lista
+    favorito.delete()
+    
+    # Creamos el mensaje de éxito
+    messages.success(request, f"'{nombre_producto}' se eliminó de tus favoritos correctamente.")
+    
+    # Redirigimos a la vista de favoritos (usa el 'name' de tu urls.py)
+    return redirect('favoritos')
+
+def home(request):
+    query = request.GET.get('q')
+    limite_fecha = timezone.now() - timedelta(days=5)
+    
+    # 1. Base de productos aprobados con el promedio de estrellas calculado (Anotación)
+    base_productos = Producto.objects.filter(estado='aprobado').annotate(
+        promedio_rating=Avg('resenas__calificacion')
+    )
+
+    # 2. PRODUCTOS RECIENTES (Para el carrusel)
+    # Solo de los últimos 5 días
+    productos_recientes = base_productos.filter(
+        fecha_creacion__gte=limite_fecha
+    ).order_by('-fecha_creacion')[:5]
+
+    # 3. TODOS LAS PUBLICACIONES (Para la galería)
+    # Si hay una búsqueda, filtramos por nombre o descripción
+    publicaciones = base_productos
+    if query:
+        publicaciones = publicaciones.filter(
+            Q(nombre__icontains=query) | 
+            Q(descripcion__icontains=query)
+        )
+    
+    productos_todos = publicaciones.order_by('-fecha_creacion')
+
+    # 4. PRODUCTOS POPULARES (Opcional, si los sigues usando)
+    productos_populares = base_productos.filter(
+        tipo='producto',
+        promedio_rating__gte=4
+    ).order_by('-promedio_rating')[:4]
+
+    return render(request, 'core/home.html', {
+        'productos_recientes': productos_recientes,
+        'productos': productos_todos,
+        'productos_populares': productos_populares,
+        'query': query
+    })
